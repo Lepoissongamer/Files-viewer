@@ -9,6 +9,6 @@ Vencord Plugin for opening full file.
 - Follow that path: \AppData\Roaming\Vencord
 - copy and past the dist folder (\Files viewer\Installation files\Vencord\dist)
 
--# You can use: windows+r-> past: %appdata% for accessing the: \AppData\Roaming\
-
--# Files viewer is a normal plugins so you have to enable it like a normal plugins.
+## tip:
+- You can use: windows+r-> past: %appdata% for accessing the: \AppData\Roaming\
+- Files viewer is a normal plugins so you have to enable it like a normal plugins.
