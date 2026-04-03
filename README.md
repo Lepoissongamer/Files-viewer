@@ -1,14 +1,14 @@
 # Files-viewer
 Vencord Plugin for opening full file.
 
-For Vesktop:
+## For Vesktop:
 - Follow that path: \AppData\Roaming\vesktop
 - copy and past the the sessionData folder (\Files viewer\Installation files\Vesktop)
 
-For Vencord:
+## For Vencord:
 - Follow that path: \AppData\Roaming\Vencord
 - copy and past the dist folder (\Files viewer\Installation files\Vencord\dist)
 
-You can use: windows+r-> past: %appdata% for accessing the: \AppData\Roaming\
+-# You can use: windows+r-> past: %appdata% for accessing the: \AppData\Roaming\
 
-Files viewer is a normal plugins so you have to enable it like a normal plugins.
+-# Files viewer is a normal plugins so you have to enable it like a normal plugins.
