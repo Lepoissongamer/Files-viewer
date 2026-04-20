@@ -10,7 +10,9 @@ https://github.com/user-attachments/assets/17e4cb6f-4227-4f8a-ae5d-86d85c342e1c
 
 
 # installation step:
-
+## Install [Vencord](https://vencord.dev/download/) or [Vesktop](https://vesktop.dev/install/)
+- Link to install Vencord: https://vencord.dev/download/
+- Link to install Vesktop: https://vesktop.dev/install/
 ## For Vesktop:
 - Follow that path: \AppData\Roaming\vesktop
 - copy and past the the sessionData folder (\Files viewer\Installation files\Vesktop)
