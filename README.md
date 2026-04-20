@@ -1,8 +1,13 @@
 # Files-viewer
-A Vencord Plugin for opening full file.
-Add a new files viewer to discord, allow you to the see the full size of the file. Come with many fonction like performence mode and VSCode support (with the ShikiCodeblocks plugins)
+A Vencord Plugin that add a brand new files-viewer direcly in discord.
+The plugins add a new files viewer to discord, allow you to see the full content of a files and to edit the files direcly in discord. Come with many fonction like performence mode and VSCode support (with the ShikiCodeblocks plugins)
 
-<img width="1499" height="1002" alt="image" src="https://github.com/user-attachments/assets/27e3d19e-8e34-4812-b972-8a7e56079386" />
+<img width="1499" height="1005" alt="image" src="https://github.com/user-attachments/assets/4cf61d43-74ac-4cb5-9958-4b42b4f80d2d" />
+
+
+https://github.com/user-attachments/assets/17e4cb6f-4227-4f8a-ae5d-86d85c342e1c
+
+
 
 # installation step:
 
