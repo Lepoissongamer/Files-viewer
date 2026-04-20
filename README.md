@@ -22,5 +22,5 @@ https://github.com/user-attachments/assets/17e4cb6f-4227-4f8a-ae5d-86d85c342e1c
 - copy and past the dist folder (\Files viewer\Installation files\Vencord\dist)
 
 ### tip:
-- You can use: windows+r-> past: %appdata% for accessing the: \AppData\Roaming\
+- You can use: windows+r-> past: `%appdata%` for accessing the: \AppData\Roaming\
 - Files viewer is a normal plugins so you have to enable it like a normal plugins.
