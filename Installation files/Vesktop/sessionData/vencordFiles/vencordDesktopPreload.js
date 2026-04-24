@@ -1,4 +1,4 @@
-// Vencord cba0eb98
+// Vencord cacd0efd
 // Standalone: false
 // Platform: linux
 // Updater Disabled: false
