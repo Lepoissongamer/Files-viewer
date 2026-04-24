@@ -6,8 +6,9 @@
 
 import { definePluginSettings } from "@api/Settings";
 import ErrorBoundary from "@components/ErrorBoundary";
+import { copyWithToast } from "@utils/discord";
 import definePlugin, { OptionType } from "@utils/types";
-import { createRoot, React, Tooltip, useEffect, useRef, useState } from "@webpack/common";
+import { ChannelStore, createRoot, DraftType, React, SelectedChannelStore, showToast, Toasts, Tooltip, UploadHandler, useEffect, useRef, useState } from "@webpack/common";
 import type { Root } from "react-dom/client";
 
 const settings = definePluginSettings({
@@ -134,6 +135,44 @@ function withLineNumbers(rawText: string, lineCount: number) {
         .join("\n");
 }
 
+function getLineCount(rawText: string) {
+    return rawText.split("\n").length;
+}
+
+function getTextMimeType(filename: string) {
+    const name = filename.toLowerCase();
+
+    if (name.endsWith(".json")) return "application/json";
+    if (name.endsWith(".xml")) return "application/xml";
+    if (name.endsWith(".log") || name.endsWith(".txt") || name.endsWith(".ini") || name.endsWith(".cfg")) {
+        return "text/plain";
+    }
+
+    return "text/plain";
+}
+
+function attachFileToCurrentChannel(filename: string, fileText: string) {
+    const channelId = SelectedChannelStore.getChannelId();
+    const channel = channelId ? ChannelStore.getChannel(channelId) : null;
+
+    if (!channel) {
+        showToast("Impossible d'ajouter la pièce jointe: aucun salon actif.", Toasts.Type.FAILURE);
+        return false;
+    }
+
+    const uploadFile = new File([fileText], filename || "document.txt", { type: getTextMimeType(filename) });
+
+    try {
+        UploadHandler.promptToUpload([uploadFile], channel, DraftType.ChannelMessage);
+        showToast("Fichier ajouté comme pièce jointe.", Toasts.Type.SUCCESS);
+        return true;
+    } catch (err) {
+        console.error("[FullLogViewer] Failed to attach edited file", err);
+        showToast("Impossible d'ajouter la pièce jointe.", Toasts.Type.FAILURE);
+        return false;
+    }
+}
+
 function clearSearchHighlights(root: HTMLElement) {
     const marks = root.querySelectorAll("mark.vc-log-search-hit");
     marks.forEach(mark => {
@@ -190,6 +229,115 @@ function applySearchHighlight(root: HTMLElement, query: string, maxMatches = Num
     return marks;
 }
 
+function getSearchRoots(root: HTMLElement) {
+    const shikiCodeCells = root.querySelectorAll<HTMLElement>(".vc-shiki-table-row > .vc-shiki-table-cell:nth-child(2)");
+    return shikiCodeCells.length ? Array.from(shikiCodeCells) : [root];
+}
+
+type SearchSegment = { node: Text; start: number; end: number; };
+type SearchIndex = {
+    lowerText: string;
+    segments: SearchSegment[];
+};
+
+function buildSearchIndex(root: HTMLElement): SearchIndex {
+    const segments: SearchSegment[] = [];
+    let combinedText = "";
+
+    for (const searchRoot of getSearchRoots(root)) {
+        if (combinedText) combinedText += "\n";
+
+        const walker = document.createTreeWalker(searchRoot, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+            const node = walker.currentNode as Text;
+            const value = node.nodeValue ?? "";
+            if (!value) continue;
+
+            const start = combinedText.length;
+            combinedText += value;
+            segments.push({ node, start, end: combinedText.length });
+        }
+    }
+
+    return {
+        lowerText: combinedText.toLowerCase(),
+        segments
+    };
+}
+
+function findSegmentForOffset(segments: SearchSegment[], offset: number) {
+    let low = 0;
+    let high = segments.length - 1;
+
+    while (low <= high) {
+        const mid = (low + high) >> 1;
+        const segment = segments[mid];
+
+        if (offset < segment.start) {
+            high = mid - 1;
+        } else if (offset > segment.end) {
+            low = mid + 1;
+        } else {
+            return segment;
+        }
+    }
+
+    return null;
+}
+
+function findSearchRanges(searchIndex: SearchIndex, query: string, maxMatches = Number.POSITIVE_INFINITY) {
+    if (!query) return [] as Range[];
+
+    const lowerQuery = query.toLowerCase();
+    const ranges: Range[] = [];
+    let start = 0;
+    let idx = searchIndex.lowerText.indexOf(lowerQuery, start);
+
+    while (idx !== -1 && ranges.length < maxMatches) {
+        const end = idx + query.length;
+        const startSegment = findSegmentForOffset(searchIndex.segments, idx);
+        const endSegment = findSegmentForOffset(searchIndex.segments, end);
+
+        if (startSegment && endSegment) {
+            const range = document.createRange();
+            range.setStart(startSegment.node, idx - startSegment.start);
+            range.setEnd(endSegment.node, end - endSegment.start);
+            ranges.push(range);
+        }
+
+        start = end;
+        idx = searchIndex.lowerText.indexOf(lowerQuery, start);
+    }
+
+    return ranges;
+}
+
+function canUseCssHighlights() {
+    return Boolean((CSS as unknown as { highlights?: Map<string, unknown>; }).highlights && (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown; }).Highlight);
+}
+
+function clearCssSearchHighlights(hitName: string, activeName: string) {
+    const { highlights } = CSS as unknown as { highlights?: Map<string, unknown>; };
+    highlights?.delete(hitName);
+    highlights?.delete(activeName);
+}
+
+function setCssSearchHighlights(hitName: string, activeName: string, ranges: Range[], activeIndex: number) {
+    const { highlights } = CSS as unknown as { highlights?: Map<string, unknown>; };
+    const { Highlight: HighlightCtor } = window as unknown as { Highlight?: new (...ranges: Range[]) => unknown; };
+    if (!highlights || !HighlightCtor) return false;
+
+    const safeActiveIndex = activeIndex >= 0 && activeIndex < ranges.length ? activeIndex : -1;
+    const regularRanges = safeActiveIndex === -1
+        ? ranges
+        : ranges.filter((_, i) => i !== safeActiveIndex);
+    const activeRanges = safeActiveIndex === -1 ? [] : [ranges[safeActiveIndex]];
+
+    highlights.set(hitName, new HighlightCtor(...regularRanges));
+    highlights.set(activeName, new HighlightCtor(...activeRanges));
+    return true;
+}
+
 function openLogModal(
     filename: string,
     rawText: string,
@@ -206,20 +354,25 @@ function openLogModal(
         forceShikiInPerformanceMode
     } = settings.store;
 
-    const lineCount = rawText.split("\n").length;
     const autoPerformanceMode = performanceModeEnabled && autoPerfEnabled;
-    const autoDetectedPerformanceMode = performanceModeEnabled && (
-        autoPerformanceMode
-            ? rawText.length > autoCharThreshold || lineCount > autoLineThreshold
-            : true
-    );
-    const isPerformanceMode = performanceModeEnabled && (manualPerformanceMode ?? autoDetectedPerformanceMode);
-    const useLowGpuMode = isPerformanceMode;
-    const maxHighlightedMatches = isPerformanceMode ? 250 : 2_500;
-    const minSearchLength = isPerformanceMode ? 2 : 1;
+    let currentText = rawText;
+    let isEditing = false;
+    let editor: HTMLTextAreaElement | null = null;
+    let editorHighlightLayer: HTMLElement | null = null;
+    let renderRoot: Root | null = null;
+    let searchableRoot: HTMLElement | null = null;
+    let searchIndex: SearchIndex | null = null;
+    let currentMatches: HTMLElement[] = [];
+    let currentRangeMatches: Range[] = [];
+    let editorMatches: Array<{ start: number; end: number; }> = [];
+    let activeMatchIndex = -1;
+    let searchDebounce: number | null = null;
+    let useRangeSearch = false;
+    let didCleanup = false;
     const shikiCharLimit = 120_000;
-    const canUseShikiInPerf = !isPerformanceMode || forceShikiInPerformanceMode;
-    const numberedText = withLineNumbers(rawText, lineCount);
+    const highlightId = Math.random().toString(36).slice(2);
+    const cssHitHighlightName = `vc-log-search-hit-${highlightId}`;
+    const cssActiveHighlightName = `vc-log-search-active-${highlightId}`;
 
     const bgPrimary = "var(--background-primary, #1e1f22)";
     const bgSecondary = "var(--background-secondary, #2b2d31)";
@@ -229,12 +382,27 @@ function openLogModal(
     const textMuted = "var(--text-muted, #b5bac1)";
     const buttonSecondary = "var(--button-secondary-background, #4e5058)";
     const buttonDanger = "var(--button-danger-background, #da373c)";
+    const buttonSuccess = "var(--button-positive-background, #248046)";
+    const initialLineCount = getLineCount(currentText);
 
     const existing = document.getElementById("vc-full-log-viewer-modal");
     if (existing) {
         (existing as { vcCleanup?: () => void; }).vcCleanup?.();
         existing.remove();
     }
+
+    const cssHighlightStyle = document.createElement("style");
+    cssHighlightStyle.textContent = `
+::highlight(${cssHitHighlightName}) {
+    background-color: #f7cc4a;
+    color: #1a1a1a;
+}
+::highlight(${cssActiveHighlightName}) {
+    background-color: #ff9800;
+    color: #111;
+}
+`;
+    document.head.appendChild(cssHighlightStyle);
 
     const overlay = document.createElement("div");
     overlay.id = "vc-full-log-viewer-modal";
@@ -255,7 +423,13 @@ function openLogModal(
     box.style.display = "flex";
     box.style.flexDirection = "column";
     box.style.overflow = "hidden";
-    box.style.boxShadow = useLowGpuMode ? "none" : "0 20px 60px rgba(0,0,0,0.45)";
+    box.style.boxShadow = (
+        performanceModeEnabled && (
+            autoPerformanceMode
+                ? currentText.length > autoCharThreshold || initialLineCount > autoLineThreshold
+                : true
+        ) && manualPerformanceMode !== false
+    ) ? "none" : "0 20px 60px rgba(0,0,0,0.45)";
 
     const header = document.createElement("div");
     header.style.display = "flex";
@@ -283,7 +457,7 @@ function openLogModal(
     search.style.minWidth = "220px";
 
     const prevBtn = document.createElement("button");
-    prevBtn.textContent = "◀";
+    prevBtn.textContent = "▲";
     prevBtn.title = "Back";
     prevBtn.style.padding = "8px 10px";
     prevBtn.style.borderRadius = "8px";
@@ -294,7 +468,7 @@ function openLogModal(
     prevBtn.disabled = true;
 
     const nextBtn = document.createElement("button");
-    nextBtn.textContent = "▶";
+    nextBtn.textContent = "▼";
     nextBtn.title = "Next";
     nextBtn.style.padding = "8px 10px";
     nextBtn.style.borderRadius = "8px";
@@ -313,21 +487,56 @@ function openLogModal(
     copyBtn.style.background = buttonSecondary;
     copyBtn.style.color = textNormal;
     copyBtn.onclick = async () => {
-        await navigator.clipboard.writeText(rawText);
+        await copyWithToast(isEditing ? (editor?.value ?? currentText) : currentText, "File copied to clipboard!");
     };
 
+    const editBtn = document.createElement("button");
+    editBtn.textContent = "Edit file";
+    editBtn.style.padding = "8px 12px";
+    editBtn.style.borderRadius = "8px";
+    editBtn.style.border = "none";
+    editBtn.style.cursor = "pointer";
+    editBtn.style.background = buttonSecondary;
+    editBtn.style.color = textNormal;
+
+    const closeEditBtn = document.createElement("button");
+    closeEditBtn.textContent = "Close edit";
+    closeEditBtn.title = "Close the edit windows without editing";
+    closeEditBtn.style.padding = "8px 12px";
+    closeEditBtn.style.borderRadius = "8px";
+    closeEditBtn.style.border = "none";
+    closeEditBtn.style.cursor = "pointer";
+    closeEditBtn.style.background = buttonDanger;
+    closeEditBtn.style.color = textNormal;
+    closeEditBtn.style.display = "none";
+
     const closeBtn = document.createElement("button");
-    closeBtn.textContent = "Close";
-    closeBtn.style.padding = "8px 12px";
-    closeBtn.style.borderRadius = "8px";
+    closeBtn.textContent = "X";
+    closeBtn.title = "Close";
+    closeBtn.style.width = "36px";
+    closeBtn.style.height = "32px";
+    closeBtn.style.padding = "0";
+    closeBtn.style.borderRadius = "6px";
     closeBtn.style.border = "none";
     closeBtn.style.cursor = "pointer";
-    closeBtn.style.background = buttonDanger;
-    closeBtn.style.color = "white";
-    closeBtn.onclick = () => overlay.remove();
+    closeBtn.style.background = "transparent";
+    closeBtn.style.color = textNormal;
+    closeBtn.style.fontSize = "22px";
+    closeBtn.style.lineHeight = "32px";
+    closeBtn.style.display = "inline-flex";
+    closeBtn.style.alignItems = "center";
+    closeBtn.style.justifyContent = "center";
+    closeBtn.onmouseenter = () => {
+        closeBtn.style.background = buttonDanger;
+        closeBtn.style.color = "white";
+    };
+    closeBtn.onmouseleave = () => {
+        closeBtn.style.background = "transparent";
+        closeBtn.style.color = textNormal;
+    };
 
     const perfToggleBtn = document.createElement("button");
-    perfToggleBtn.textContent = isPerformanceMode ? "Perf: ON" : "Perf: OFF";
+    perfToggleBtn.textContent = "Perf: OFF";
     perfToggleBtn.style.padding = "8px 12px";
     perfToggleBtn.style.borderRadius = "8px";
     perfToggleBtn.style.border = "none";
@@ -340,7 +549,7 @@ function openLogModal(
     stats.style.fontSize = "12px";
     stats.style.color = textMuted;
     stats.style.borderBottom = `1px solid ${borderColor}`;
-    stats.textContent = `${rawText.length.toLocaleString()} character • ${lineCount.toLocaleString()} lignes`;
+    stats.textContent = "";
 
     const content = document.createElement("div");
     content.style.flex = "1";
@@ -351,67 +560,42 @@ function openLogModal(
     content.style.setProperty("-webkit-user-select", "text");
     content.style.cursor = "text";
 
-    let renderRoot: Root | null = null;
-    let searchableRoot: HTMLElement | null = null;
-    const shikiPlugin = Vencord?.Plugins?.plugins?.ShikiCodeblocks as { renderHighlighter?: (args: { lang: string, content: string; }) => React.ReactNode; } | undefined;
-    const canUseShiki = Boolean(
-        showShiki
-        && Vencord?.Plugins?.isPluginEnabled?.("ShikiCodeblocks")
-        && shikiPlugin?.renderHighlighter
-        && (
-            !isPerformanceMode
-            || (canUseShikiInPerf && (forceShikiInPerformanceMode || rawText.length <= shikiCharLimit))
-        )
-    );
+    const scrollEditorToOffset = (offset: number) => {
+        if (!editor) return;
 
-    if (canUseShiki) {
-        try {
-            const shikiContainerEl = document.createElement("div");
-            shikiContainerEl.style.padding = "0";
-            shikiContainerEl.style.setProperty("--text-default", textNormal);
-            shikiContainerEl.style.setProperty("--background-base-lower", bgSecondary);
-            shikiContainerEl.style.userSelect = "text";
-            shikiContainerEl.style.setProperty("-webkit-user-select", "text");
-            content.appendChild(shikiContainerEl);
-            searchableRoot = shikiContainerEl;
+        const beforeMatch = editor.value.slice(0, offset);
+        const lineCountBeforeMatch = beforeMatch.split("\n").length - 1;
+        const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 17.4;
+        editor.scrollTop = Math.max(0, (lineCountBeforeMatch * lineHeight) - (editor.clientHeight / 2));
+    };
 
-            renderRoot = createRoot(shikiContainerEl);
-            renderRoot.render(
-                shikiPlugin!.renderHighlighter!({
-                    lang: inferLanguage(filename, rawText),
-                    content: rawText
-                })
-            );
-        } catch (err) {
-            console.error("[FullLogViewer] Failed to render Shiki", err);
-        }
-    }
-
-    if (!renderRoot) {
-        const pre = document.createElement("pre");
-        pre.style.margin = "0";
-        pre.style.whiteSpace = "pre";
-        pre.style.wordBreak = "normal";
-        pre.style.overflowWrap = "normal";
-        pre.style.fontFamily = "var(--font-code)";
-        pre.style.fontSize = "12px";
-        pre.style.lineHeight = "1.45";
-        pre.style.color = textNormal;
-        pre.style.userSelect = "text";
-        pre.style.setProperty("-webkit-user-select", "text");
-        pre.textContent = numberedText;
-
-        content.appendChild(pre);
-        searchableRoot = pre;
-    }
-
-    let currentMatches: HTMLElement[] = [];
-    let activeMatchIndex = -1;
-
-    const focusMatch = (index: number) => {
-        if (!currentMatches.length) return;
-        const safeIndex = ((index % currentMatches.length) + currentMatches.length) % currentMatches.length;
+    const focusMatch = (index: number, focusEditor = true) => {
+        const matchCount = isEditing ? editorMatches.length : useRangeSearch ? currentRangeMatches.length : currentMatches.length;
+        if (!matchCount) return;
+        const safeIndex = ((index % matchCount) + matchCount) % matchCount;
         activeMatchIndex = safeIndex;
+
+        if (isEditing && editor) {
+            const match = editorMatches[safeIndex];
+            if (focusEditor) editor.focus();
+            editor.setSelectionRange(match.start, match.start);
+            scrollEditorToOffset(match.start);
+            paintEditorHighlights(editor.value, search.value.trim(), true);
+            return;
+        }
+
+        if (useRangeSearch) {
+            const range = currentRangeMatches[safeIndex];
+            if (canUseCssHighlights()) {
+                setCssSearchHighlights(cssHitHighlightName, cssActiveHighlightName, currentRangeMatches, safeIndex);
+            } else {
+                const selection = window.getSelection();
+                selection?.removeAllRanges();
+                selection?.addRange(range);
+            }
+            range.startContainer.parentElement?.scrollIntoView({ behavior: "auto", block: "center" });
+            return;
+        }
 
         currentMatches.forEach((m, i) => {
             if (i === safeIndex) {
@@ -426,42 +610,395 @@ function openLogModal(
         currentMatches[safeIndex]?.scrollIntoView({ behavior: "auto", block: "center" });
     };
 
-    const render = (retry = 0) => {
-        if (!searchableRoot) return;
+    const getWorkingText = () => isEditing ? (editor?.value ?? currentText) : currentText;
+
+    const updateEditorMatches = (text: string) => {
+        editorMatches = [];
+
+        const { maxHighlightedMatches, minSearchLength } = getPerformanceState(text);
         const query = search.value.trim();
         const shouldSearch = query.length >= minSearchLength;
-        currentMatches = shouldSearch
-            ? applySearchHighlight(searchableRoot, query, maxHighlightedMatches)
-            : applySearchHighlight(searchableRoot, "");
 
-        if (shouldSearch && currentMatches.length === 0 && canUseShiki && retry < 10) {
-            setTimeout(() => render(retry + 1), 80);
+        if (shouldSearch) {
+            const lowerText = text.toLowerCase();
+            const lowerQuery = query.toLowerCase();
+            let start = 0;
+            let idx = lowerText.indexOf(lowerQuery, start);
+
+            while (idx !== -1 && editorMatches.length < maxHighlightedMatches) {
+                editorMatches.push({ start: idx, end: idx + query.length });
+                start = idx + query.length;
+                idx = lowerText.indexOf(lowerQuery, start);
+            }
         }
 
-        prevBtn.disabled = currentMatches.length === 0;
-        nextBtn.disabled = currentMatches.length === 0;
-
-        if (currentMatches.length > 0) {
-            focusMatch(0);
+        if (editorMatches.length > 0) {
+            const selectionStart = editor?.selectionStart ?? 0;
+            const currentIndex = editorMatches.findIndex(match => selectionStart >= match.start && selectionStart <= match.end);
+            activeMatchIndex = currentIndex === -1 ? 0 : currentIndex;
         } else {
             activeMatchIndex = -1;
         }
 
+        return { query, shouldSearch };
+    };
+
+    const paintEditorHighlights = (text: string, query: string, shouldSearch: boolean) => {
+        if (!editorHighlightLayer) return;
+
+        editorHighlightLayer.replaceChildren();
+
+        if (!shouldSearch || !query || editorMatches.length === 0) {
+            editorHighlightLayer.textContent = text || " ";
+            return;
+        }
+
+        let cursor = 0;
+        for (let i = 0; i < editorMatches.length; i++) {
+            const match = editorMatches[i];
+            if (match.start > cursor) {
+                editorHighlightLayer.appendChild(document.createTextNode(text.slice(cursor, match.start)));
+            }
+
+            const span = document.createElement("span");
+            span.textContent = text.slice(match.start, match.end);
+            span.style.background = i === activeMatchIndex ? "#ff9800" : "#f7cc4a";
+            span.style.color = "#1a1a1a";
+            editorHighlightLayer.appendChild(span);
+            cursor = match.end;
+        }
+
+        if (cursor < text.length) {
+            editorHighlightLayer.appendChild(document.createTextNode(text.slice(cursor)));
+        }
+
+        if (text.endsWith("\n")) {
+            editorHighlightLayer.appendChild(document.createTextNode(" "));
+        }
+    };
+
+    const getPerformanceState = (text: string) => {
+        const lineCount = getLineCount(text);
+        const autoDetectedPerformanceMode = performanceModeEnabled && (
+            autoPerformanceMode
+                ? text.length > autoCharThreshold || lineCount > autoLineThreshold
+                : true
+        );
+        const isPerformanceMode = performanceModeEnabled && (manualPerformanceMode ?? autoDetectedPerformanceMode);
+        const useLowGpuMode = isPerformanceMode;
+        const maxHighlightedMatches = isPerformanceMode ? 250 : 2_500;
+        const minSearchLength = isPerformanceMode ? 2 : 1;
+
+        return {
+            isPerformanceMode,
+            lineCount,
+            maxHighlightedMatches,
+            minSearchLength,
+            useLowGpuMode
+        };
+    };
+
+    const updateButtons = () => {
+        editBtn.textContent = isEditing ? "Insert files" : "Edit file";
+        editBtn.style.background = isEditing ? buttonSuccess : buttonSecondary;
+        editBtn.title = isEditing ? "Insert the file in the chat box and close" : "Edit file";
+        closeEditBtn.style.display = isEditing ? "inline-block" : "none";
+        search.disabled = false;
+        const query = search.value.trim();
+        const { minSearchLength } = getPerformanceState(getWorkingText());
+        const isSearchActive = query.length >= minSearchLength;
+        const matchCount = isEditing ? editorMatches.length : useRangeSearch ? currentRangeMatches.length : currentMatches.length;
+        prevBtn.style.display = isSearchActive ? "inline-block" : "none";
+        nextBtn.style.display = isSearchActive ? "inline-block" : "none";
+        prevBtn.disabled = matchCount === 0;
+        nextBtn.disabled = matchCount === 0;
+
+        const { isPerformanceMode } = getPerformanceState(getWorkingText());
+        perfToggleBtn.textContent = isPerformanceMode ? "Perf: ON" : "Perf: OFF";
+        perfToggleBtn.style.display = isEditing ? "none" : "inline-block";
+    };
+
+    const updateStats = () => {
+        const text = getWorkingText();
+        const {
+            isPerformanceMode,
+            lineCount,
+            maxHighlightedMatches,
+            minSearchLength,
+            useLowGpuMode
+        } = getPerformanceState(text);
+
+        const query = search.value.trim();
+        const shouldSearch = query.length >= minSearchLength;
+        const matchCount = isEditing ? editorMatches.length : useRangeSearch ? currentRangeMatches.length : currentMatches.length;
         const matchPart = shouldSearch
-            ? ` • ${currentMatches.length.toLocaleString()} result${currentMatches.length ? ` • ${activeMatchIndex + 1}/${currentMatches.length}` : ""}`
+            ? ` • ${matchCount.toLocaleString()} result${matchCount ? ` • ${activeMatchIndex + 1}/${matchCount}` : ""}`
             : "";
         const perfPart = isPerformanceMode
             ? ` • perf mode (${manualPerformanceMode == null ? (autoPerformanceMode ? "auto" : "manuel-global") : "manuel-viewer"}, search >= ${minSearchLength} chars, max ${maxHighlightedMatches.toLocaleString()} highlights)`
             : "";
         const gpuPart = useLowGpuMode ? " • low-gpu mode" : "";
-        stats.textContent = `${rawText.length.toLocaleString()} character • ${lineCount.toLocaleString()} lignes${matchPart}${perfPart}${gpuPart}`;
+        const editPart = isEditing ? " • editing" : "";
+
+        stats.textContent = `${text.length.toLocaleString()} character • ${lineCount.toLocaleString()} lignes${matchPart}${perfPart}${gpuPart}${editPart}`;
+        updateButtons();
     };
 
-    let searchDebounce: number | null = null;
+    const renderViewer = () => {
+        const text = currentText;
+        const { isPerformanceMode } = getPerformanceState(text);
+        const canUseShikiInPerf = !isPerformanceMode || forceShikiInPerformanceMode;
+        const shikiPlugin = Vencord?.Plugins?.plugins?.ShikiCodeblocks as { renderHighlighter?: (args: { lang: string, content: string; }) => React.ReactNode; } | undefined;
+        const canUseShiki = Boolean(
+            showShiki
+            && Vencord?.Plugins?.isPluginEnabled?.("ShikiCodeblocks")
+            && shikiPlugin?.renderHighlighter
+            && (
+                !isPerformanceMode
+                || (canUseShikiInPerf && (forceShikiInPerformanceMode || text.length <= shikiCharLimit))
+            )
+        );
+
+        if (canUseShiki) {
+            try {
+                const shikiContainerEl = document.createElement("div");
+                shikiContainerEl.style.padding = "0";
+                shikiContainerEl.style.setProperty("--text-default", textNormal);
+                shikiContainerEl.style.setProperty("--background-base-lower", bgSecondary);
+                shikiContainerEl.style.userSelect = "text";
+                shikiContainerEl.style.setProperty("-webkit-user-select", "text");
+                content.appendChild(shikiContainerEl);
+                searchableRoot = shikiContainerEl;
+                useRangeSearch = true;
+
+                renderRoot = createRoot(shikiContainerEl);
+                renderRoot.render(
+                    shikiPlugin!.renderHighlighter!({
+                        lang: inferLanguage(filename, text),
+                        content: text
+                    })
+                );
+                return;
+            } catch (err) {
+                console.error("[FullLogViewer] Failed to render Shiki", err);
+            }
+        }
+
+        const pre = document.createElement("pre");
+        pre.style.margin = "0";
+        pre.style.whiteSpace = "pre";
+        pre.style.wordBreak = "normal";
+        pre.style.overflowWrap = "normal";
+        pre.style.fontFamily = "var(--font-code)";
+        pre.style.fontSize = "12px";
+        pre.style.lineHeight = "1.45";
+        pre.style.color = textNormal;
+        pre.style.userSelect = "text";
+        pre.style.setProperty("-webkit-user-select", "text");
+        pre.textContent = withLineNumbers(text, getLineCount(text));
+
+        content.appendChild(pre);
+        searchableRoot = pre;
+        useRangeSearch = false;
+    };
+
+    const renderEditor = () => {
+        const editorWrap = document.createElement("div");
+        editorWrap.style.position = "relative";
+        editorWrap.style.width = "100%";
+        editorWrap.style.height = "100%";
+        editorWrap.style.border = `1px solid ${borderColor}`;
+        editorWrap.style.borderRadius = "10px";
+        editorWrap.style.background = bgSecondary;
+        editorWrap.style.overflow = "hidden";
+        editorWrap.style.boxSizing = "border-box";
+
+        const highlightLayer = document.createElement("pre");
+        highlightLayer.style.position = "absolute";
+        highlightLayer.style.inset = "0";
+        highlightLayer.style.margin = "0";
+        highlightLayer.style.padding = "14px";
+        highlightLayer.style.fontFamily = "var(--font-code)";
+        highlightLayer.style.fontSize = "12px";
+        highlightLayer.style.lineHeight = "1.45";
+        highlightLayer.style.color = textNormal;
+        highlightLayer.style.whiteSpace = "pre-wrap";
+        highlightLayer.style.wordBreak = "break-word";
+        highlightLayer.style.overflow = "hidden";
+        highlightLayer.style.boxSizing = "border-box";
+        highlightLayer.style.pointerEvents = "none";
+        highlightLayer.style.userSelect = "none";
+
+        const textarea = document.createElement("textarea");
+        textarea.value = currentText;
+        textarea.style.width = "100%";
+        textarea.style.height = "100%";
+        textarea.style.position = "absolute";
+        textarea.style.inset = "0";
+        textarea.style.resize = "none";
+        textarea.style.border = "none";
+        textarea.style.background = "transparent";
+        textarea.style.color = "transparent";
+        textarea.style.caretColor = textNormal;
+        textarea.style.padding = "14px";
+        textarea.style.fontFamily = "var(--font-code)";
+        textarea.style.fontSize = "12px";
+        textarea.style.lineHeight = "1.45";
+        textarea.style.outline = "none";
+        textarea.style.boxSizing = "border-box";
+        textarea.style.whiteSpace = "pre-wrap";
+        textarea.style.wordBreak = "break-word";
+        textarea.addEventListener("input", () => {
+            render(0);
+        });
+        textarea.addEventListener("scroll", () => {
+            highlightLayer.scrollTop = textarea.scrollTop;
+            highlightLayer.scrollLeft = textarea.scrollLeft;
+        });
+
+        editor = textarea;
+        editorHighlightLayer = highlightLayer;
+        editorWrap.appendChild(highlightLayer);
+        editorWrap.appendChild(textarea);
+        content.appendChild(editorWrap);
+        paintEditorHighlights(currentText, search.value.trim(), false);
+        textarea.focus();
+    };
+
+    const renderContent = (retry = 0) => {
+        renderRoot?.unmount();
+        renderRoot = null;
+        searchableRoot = null;
+        searchIndex = null;
+        editorHighlightLayer = null;
+        editor = null;
+        useRangeSearch = false;
+        clearCssSearchHighlights(cssHitHighlightName, cssActiveHighlightName);
+        content.replaceChildren();
+        currentMatches = [];
+        currentRangeMatches = [];
+        editorMatches = [];
+        activeMatchIndex = -1;
+
+        if (isEditing) {
+            renderEditor();
+            render(0);
+            return;
+        }
+
+        renderViewer();
+
+        const text = currentText;
+        const { isPerformanceMode, maxHighlightedMatches, minSearchLength } = getPerformanceState(text);
+        const query = search.value.trim();
+        const shouldSearch = query.length >= minSearchLength;
+        if (useRangeSearch && searchableRoot) {
+            searchIndex ??= buildSearchIndex(searchableRoot);
+            currentMatches = [];
+            currentRangeMatches = shouldSearch
+                ? findSearchRanges(searchIndex, query, maxHighlightedMatches)
+                : [];
+            if (canUseCssHighlights()) {
+                setCssSearchHighlights(cssHitHighlightName, cssActiveHighlightName, currentRangeMatches, -1);
+            }
+        } else {
+            clearCssSearchHighlights(cssHitHighlightName, cssActiveHighlightName);
+            currentRangeMatches = [];
+            currentMatches = shouldSearch && searchableRoot
+                ? applySearchHighlight(searchableRoot, query, maxHighlightedMatches)
+                : searchableRoot
+                    ? applySearchHighlight(searchableRoot, "")
+                    : [];
+        }
+
+        const matchCount = useRangeSearch ? currentRangeMatches.length : currentMatches.length;
+        if (shouldSearch && matchCount === 0 && retry < 10) {
+            if (useRangeSearch && searchIndex?.segments.length === 0) {
+                searchIndex = null;
+            }
+            const shikiIsEnabled = showShiki && Vencord?.Plugins?.isPluginEnabled?.("ShikiCodeblocks");
+            if (shikiIsEnabled) {
+                setTimeout(() => renderContent(retry + 1), 80);
+            }
+        }
+
+        if (matchCount > 0) {
+            focusMatch(0);
+        }
+
+        if (isPerformanceMode) {
+            box.style.boxShadow = "none";
+        } else {
+            box.style.boxShadow = "0 20px 60px rgba(0,0,0,0.45)";
+        }
+
+        updateStats();
+    };
+
+    const render = (retry = 0) => {
+        if (isEditing) {
+            currentMatches = [];
+            currentRangeMatches = [];
+
+            const text = editor?.value ?? currentText;
+            const { query, shouldSearch } = updateEditorMatches(text);
+
+            paintEditorHighlights(text, query, shouldSearch);
+            updateStats();
+            return;
+        }
+
+        if (!searchableRoot) {
+            currentMatches = [];
+            currentRangeMatches = [];
+            editorMatches = [];
+            activeMatchIndex = -1;
+            updateStats();
+            return;
+        }
+
+        const { maxHighlightedMatches, minSearchLength } = getPerformanceState(currentText);
+        const query = search.value.trim();
+        const shouldSearch = query.length >= minSearchLength;
+        if (useRangeSearch) {
+            searchIndex ??= buildSearchIndex(searchableRoot);
+            currentMatches = [];
+            currentRangeMatches = shouldSearch
+                ? findSearchRanges(searchIndex, query, maxHighlightedMatches)
+                : [];
+            if (canUseCssHighlights()) {
+                setCssSearchHighlights(cssHitHighlightName, cssActiveHighlightName, currentRangeMatches, -1);
+            }
+        } else {
+            clearCssSearchHighlights(cssHitHighlightName, cssActiveHighlightName);
+            currentRangeMatches = [];
+            currentMatches = shouldSearch
+                ? applySearchHighlight(searchableRoot, query, maxHighlightedMatches)
+                : applySearchHighlight(searchableRoot, "");
+        }
+
+        const matchCount = useRangeSearch ? currentRangeMatches.length : currentMatches.length;
+        if (shouldSearch && matchCount === 0 && retry < 10) {
+            if (useRangeSearch && searchIndex?.segments.length === 0) {
+                searchIndex = null;
+            }
+            setTimeout(() => render(retry + 1), 80);
+        }
+
+        if (matchCount > 0) {
+            focusMatch(0);
+        } else {
+            activeMatchIndex = -1;
+        }
+
+        updateStats();
+    };
+
     const onSearchInput = () => {
         if (searchDebounce != null) {
             window.clearTimeout(searchDebounce);
         }
+        const { isPerformanceMode } = getPerformanceState(currentText);
         searchDebounce = window.setTimeout(() => {
             render(0);
             searchDebounce = null;
@@ -469,8 +1006,14 @@ function openLogModal(
     };
     search.addEventListener("input", onSearchInput);
 
-    prevBtn.onclick = () => focusMatch(activeMatchIndex - 1);
-    nextBtn.onclick = () => focusMatch(activeMatchIndex + 1);
+    prevBtn.onclick = () => {
+        if (isEditing && editor) updateEditorMatches(editor.value);
+        focusMatch(activeMatchIndex - 1);
+    };
+    nextBtn.onclick = () => {
+        if (isEditing && editor) updateEditorMatches(editor.value);
+        focusMatch(activeMatchIndex + 1);
+    };
 
     const onKeyDown = (e: KeyboardEvent) => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
@@ -487,7 +1030,6 @@ function openLogModal(
         }
     };
 
-    let didCleanup = false;
     const cleanup = () => {
         if (didCleanup) return;
         didCleanup = true;
@@ -498,14 +1040,39 @@ function openLogModal(
             searchDebounce = null;
         }
         renderRoot?.unmount();
+        clearCssSearchHighlights(cssHitHighlightName, cssActiveHighlightName);
+        cssHighlightStyle.remove();
         overlay.remove();
     };
 
     perfToggleBtn.onclick = () => {
+        const { isPerformanceMode } = getPerformanceState(currentText);
         const nextManualMode = !isPerformanceMode;
         onManualPerformanceModeChange?.(nextManualMode);
         cleanup();
-        openLogModal(filename, rawText, nextManualMode, onManualPerformanceModeChange);
+        openLogModal(filename, currentText, nextManualMode, onManualPerformanceModeChange);
+    };
+
+    editBtn.onclick = () => {
+        if (isEditing) {
+            const editedText = editor?.value ?? currentText;
+            if (!attachFileToCurrentChannel(filename, editedText)) {
+                return;
+            }
+            currentText = editedText;
+            isEditing = false;
+            cleanup();
+            return;
+        }
+
+        isEditing = true;
+        renderContent();
+    };
+
+    closeEditBtn.onclick = () => {
+        currentText = editor?.value ?? currentText;
+        isEditing = false;
+        renderContent();
     };
 
     overlay.addEventListener("click", e => {
@@ -521,6 +1088,8 @@ function openLogModal(
     header.appendChild(prevBtn);
     header.appendChild(nextBtn);
     header.appendChild(copyBtn);
+    header.appendChild(editBtn);
+    header.appendChild(closeEditBtn);
     if (performanceModeEnabled && allowManualPerformanceToggleInViewer) {
         header.appendChild(perfToggleBtn);
     }
@@ -533,6 +1102,7 @@ function openLogModal(
     (overlay as { vcCleanup?: () => void; }).vcCleanup = cleanup;
     document.body.appendChild(overlay);
 
+    renderContent();
     search.focus();
 }
 
@@ -710,22 +1280,30 @@ export default definePlugin({
         {
             find: "#{intl::PREVIEW_BYTES_LEFT}",
             replacement: {
-                match: /fileName:(\i),fileSize:\i}\),(?=.{0,75}?setLanguage:)(?<=fileContents:(\i),bytesLeft:(\i).+?)/g,
-                replace: "$&$self.addOpenButton({fileName:$1,fileContents:$2,bytesLeft:$3,url:arguments[0]?.url,downloadUrl:arguments[0]?.downloadUrl,attachmentUrl:arguments[0]?.attachmentUrl,attachment:arguments[0]?.attachment}),"
+                match: /fileContents:(\i),bytesLeft:(\i)\}\):null,/,
+                replace: "$&$self.addOpenButton({...arguments[0],fileContents:$1,bytesLeft:$2}),"
             }
         }
     ],
 
     addOpenButton: ErrorBoundary.wrap((attachmentData: {
-        fileName: string,
+        fileName?: string,
+        filename?: string,
+        name?: string,
         fileContents: string,
         bytesLeft: number,
         url?: string,
         downloadUrl?: string,
         attachmentUrl?: string,
-        attachment?: { url?: string, downloadUrl?: string; };
+        attachment?: { filename?: string, name?: string, url?: string, downloadUrl?: string; };
     }) => {
-        const { fileName, fileContents, bytesLeft } = attachmentData;
+        const { fileContents, bytesLeft } = attachmentData;
+        const fileName =
+            attachmentData.fileName
+            ?? attachmentData.filename
+            ?? attachmentData.name
+            ?? attachmentData.attachment?.filename
+            ?? attachmentData.attachment?.name;
         const attachmentUrl =
             attachmentData.url
             ?? attachmentData.downloadUrl
