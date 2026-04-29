@@ -1,4 +1,4 @@
-// Vencord 6b219fc2
+// Vencord d4ded722
 // Standalone: false
 // Platform: linux
 // Updater Disabled: false
